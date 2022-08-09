@@ -3,7 +3,7 @@
 // To extract bioclimatic variables from plot locations
 // This is an example scipt showing the extraction of only bio01 and bio02
 // Part of the project: Habitat-specificity of climate-trait relationships
-// script by: Dr. Stephan Kambach (stephan.kambach@gmail.com)
+// Script by: Dr. Stephan Kambach (stephan.kambach@gmail.com)
 // google earth engine code
 // visit https://biodiv-feedbacks.org/
 // #########################################
