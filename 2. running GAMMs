@@ -1,9 +1,14 @@
 ###########################################
 # Calcaulte generalized additive mixed-effects models 
 # for the relationship of climate with community-weighted mean plant traits
+# Part of: Habitat-specificity of climate-trait relationships
 # script by: Dr. Stephan Kambach (stephan.kambach@gmail.com)
+# visit https://biodiv-feedbacks.org/
 ###########################################
 
+# clear workspace
+rm(list=ls())
+gc()
 
 # 1. load libraries ---------------------------------------------------
 library(tidyverse)
@@ -473,9 +478,9 @@ all.results.random.slopes.significant =
 print("done: Model 5: SLA_CWM")
 
 # 11. write result files ------------------------------------------------------
-vroom_write(all.results.r2, "feedbacks_project1/intermediate output/gams_r2_and_slopes/gam_results_r2.csv", delim = "\t")
-vroom_write(all.results.slopes, "feedbacks_project1/intermediate output/gams_r2_and_slopes/gam_results_slopes.csv", delim = "\t")
-vroom_write(all.results.random.slopes.significant, "feedbacks_project1/intermediate output/gams_r2_and_slopes/gam_results_random_slope_significances.csv", delim = "\t")
+vroom_write(all.results.r2, "gam_results_r2.csv", delim = "\t")
+vroom_write(all.results.slopes, "gam_results_slopes.csv", delim = "\t")
+vroom_write(all.results.random.slopes.significant, "gam_results_model_term_significances.csv", delim = "\t")
 
 # save residual plots
 png(filename = "Model_residuals_model1_sla.png")
