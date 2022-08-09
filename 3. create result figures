@@ -1,0 +1,722 @@
+###########################################
+# Analyse and plot GAMM results
+# Part of: Habitat-specificity of climate-trait relationships
+# script by: Dr. Stephan Kambach (stephan.kambach@gmail.com)
+# R-code
+# visit https://biodiv-feedbacks.org/
+###########################################
+
+# clear workspace
+rm(list=ls())
+gc()
+
+# 1. load libraries ---------------------------------------------------
+library(vroom)
+library(tidyverse)
+library(tidyselect)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(cowplot)
+library(gstat)
+library(mgcv)
+library(grid)
+library(gridExtra)
+library(maps)
+library(sp)
+library(raster)
+library(viridis)
+library(ggpubr)
+library(gridExtra)
+
+# 2. load data ------------------------------------------------------------------
+setwd("")
+gams.r2 = vroom("gam_results_r2.csv", delim = "\t")
+gams.slopes = vroom("gam_results_slopes.csv", delim = "\t")
+gams.slope.significances = vroom("gam_results_model_term_significances.csv", delim = "\t")
+dat.strat = vroom("data_strat_for_gams.csv")
+
+# 3. define functions -----------------------------------------------------------
+# get European borders for plotting
+fetch.european.borders = function(){
+  
+  some.eu.countries = c(
+    "Algeria", "Austria", "Azerbajan", "Belgium", "Bulgaria", "Croatia",
+    "Cyprus", "Czech republic", "Denmark", "Egypt", "Estonia",
+    "Finland", "France", "Georgia",  "Germany", "Greece", 
+    "Greenland", "Hungary", "Iceland", "Iran", "Ireland", "Italy", "Kazakhstan", 
+    "Latvia", "Libya", "Lithuania", "Luxembourg", "Malta", "Morocco", 
+    "Netherlands", "Norway", "Poland", "Portugal", "Romania", "Russia", "Slovakia",
+    "Slovenia", "Spain", "Sweden", "Syria", "Tunisia", "Turkey", "UK", "Ukraine")
+  
+  # Retrievethe map data
+  some.eu.maps = map_data("world") %>%
+    rename(longitude = long, latitude = lat)
+  
+  # Compute the centroid as the mean longitude and lattitude
+  # Used as label coordinate for country's names
+  region.lab.data = some.eu.maps %>%
+    group_by(region) %>%
+    summarise(longitude = mean(longitude), latitude = mean(latitude))
+  
+  results = list("borders" = some.eu.maps,
+                 "labels" = region.lab.data)
+  return(results)
+}
+
+# functions used to plot convex hulls around the habitats in PC space
+# adoped from https://gist.github.com/benmarwick
+
+StatBag <- ggproto("Statbag", Stat,
+                   compute_group = function(data, scales, prop = 0.5) {
+                     
+                     #################################
+                     #################################
+                     # originally from aplpack package, plotting functions removed
+                     plothulls_ <- function(x, y, fraction, n.hull = 1,
+                                            col.hull, lty.hull, lwd.hull, density=0, ...){
+                       # function for data peeling:
+                       # x,y : data
+                       # fraction.in.inner.hull : max percentage of points within the hull to be drawn
+                       # n.hull : number of hulls to be plotted (if there is no fractiion argument)
+                       # col.hull, lty.hull, lwd.hull : style of hull line
+                       # plotting bits have been removed, BM 160321
+                       # pw 130524
+                       if(ncol(x) == 2){ y <- x[,2]; x <- x[,1] }
+                       n <- length(x)
+                       if(!missing(fraction)) { # find special hull
+                         n.hull <- 1
+                         if(missing(col.hull)) col.hull <- 1
+                         if(missing(lty.hull)) lty.hull <- 1
+                         if(missing(lwd.hull)) lwd.hull <- 1
+                         x.old <- x; y.old <- y
+                         idx <- chull(x,y); x.hull <- x[idx]; y.hull <- y[idx]
+                         for( i in 1:(length(x)/3)){
+                           x <- x[-idx]; y <- y[-idx]
+                           if( (length(x)/n) < fraction ){
+                             return(cbind(x.hull,y.hull))
+                           }
+                           idx <- chull(x,y); x.hull <- x[idx]; y.hull <- y[idx];
+                         }
+                       }
+                       if(missing(col.hull)) col.hull <- 1:n.hull
+                       if(length(col.hull)) col.hull <- rep(col.hull,n.hull)
+                       if(missing(lty.hull)) lty.hull <- 1:n.hull
+                       if(length(lty.hull)) lty.hull <- rep(lty.hull,n.hull)
+                       if(missing(lwd.hull)) lwd.hull <- 1
+                       if(length(lwd.hull)) lwd.hull <- rep(lwd.hull,n.hull)
+                       result <- NULL
+                       for( i in 1:n.hull){
+                         idx <- chull(x,y); x.hull <- x[idx]; y.hull <- y[idx]
+                         result <- c(result, list( cbind(x.hull,y.hull) ))
+                         x <- x[-idx]; y <- y[-idx]
+                         if(0 == length(x)) return(result)
+                       }
+                       result
+                     } # end of definition of plothulls
+                     #################################
+                     
+                     
+                     # prepare data to go into function below
+                     the_matrix <- matrix(data = c(data$x, data$y), ncol = 2)
+                     
+                     # get data out of function as df with names
+                     setNames(data.frame(plothulls_(the_matrix, fraction = prop)), nm = c("x", "y"))
+                     # how can we get the hull and loop vertices passed on also?
+                   },
+                   
+                   required_aes = c("x", "y")
+)
+
+# Here's the stat_ function
+#' @inheritParams ggplot2::stat_identity
+#' @param prop Proportion of all the points to be included in the bag (default is 0.5)
+stat_bag <- function(mapping = NULL, data = NULL, geom = "polygon",
+                     position = "identity", na.rm = FALSE, show.legend = NA, 
+                     inherit.aes = TRUE, prop = 0.5, alpha = 0.3, ...) {
+  layer(
+    stat = StatBag, data = data, mapping = mapping, geom = geom, 
+    position = position, show.legend = show.legend, inherit.aes = inherit.aes,
+    params = list(na.rm = na.rm, prop = prop, alpha = alpha, ...)
+  )
+}
+
+# here's the geom_
+geom_bag <- function(mapping = NULL, data = NULL,
+                     stat = "identity", position = "identity",
+                     prop = 0.5, 
+                     alpha = 0.3,
+                     ...,
+                     na.rm = FALSE,
+                     show.legend = NA,
+                     inherit.aes = TRUE) {
+  layer(
+    data = data,
+    mapping = mapping,
+    stat = StatBag,
+    geom = GeomBag,
+    position = position,
+    show.legend = show.legend,
+    inherit.aes = inherit.aes,
+    params = list(
+      na.rm = na.rm,
+      alpha = alpha,
+      prop = prop,
+      ...
+    )
+  )
+}
+
+#' @rdname ggplot2-ggproto
+#' @format NULL
+#' @usage NULL
+#' @export
+GeomBag <- ggproto("GeomBag", Geom,
+                   draw_group = function(data, panel_scales, coord) {
+                     n <- nrow(data)
+                     if (n == 1) return(zeroGrob())
+                     
+                     munched <- coord_munch(coord, data, panel_scales)
+                     # Sort by group to make sure that colors, fill, etc. come in same order
+                     munched <- munched[order(munched$group), ]
+                     
+                     # For gpar(), there is one entry per polygon (not one entry per point).
+                     # We'll pull the first value from each group, and assume all these values
+                     # are the same within each group.
+                     first_idx <- !duplicated(munched$group)
+                     first_rows <- munched[first_idx, ]
+                     
+                     ggplot2:::ggname("geom_bag",
+                                      grid:::polygonGrob(munched$x, munched$y, default.units = "native",
+                                                         id = munched$group,
+                                                         gp = grid::gpar(
+                                                           col = first_rows$colour,
+                                                           fill = alpha(first_rows$fill, first_rows$alpha),
+                                                           lwd = first_rows$size * .pt,
+                                                           lty = first_rows$linetype
+                                                         )
+                                      )
+                     )
+                     
+                     
+                   },
+                   
+                   default_aes = aes(colour = "NA", fill = "grey20", size = 0.5, linetype = 1,
+                                     alpha = NA, prop = 0.5),
+                   
+                   handle_na = function(data, params) {
+                     data
+                   },
+                   
+                   required_aes = c("x", "y"),
+                   
+                   draw_key = draw_key_polygon
+)
+
+# 3. check and clean data -------------------------------------------------------
+# omit empty rows and models, that did not work
+gams.r2 = drop_na(gams.r2)
+gams.slopes = drop_na(gams.slopes, trait)
+
+# replace names of traits and habitats
+gams.r2 = gams.r2 %>%
+  mutate(trait = recode(trait, "SLA_CWM" = "SLA",
+                        "PlantHeight_CWM" = "Plant Height",
+                        "SeedMass_CWM" = "Seed Mass",
+                        "SpecificRootLength_CWM" = "SRL")) %>%
+  mutate(trait = factor(trait, levels = c("Plant Height", "SLA", "Seed Mass", "SRL")))
+
+gams.slopes = gams.slopes %>%
+  mutate(trait = recode(trait, "SLA_CWM" = "SLA",
+                               "PlantHeight_CWM" = "Plant Height",
+                               "SeedMass_CWM" = "Seed Mass",
+                               "SpecificRootLength_CWM" = "SRL")) %>%
+  mutate(trait = factor(trait, levels = c("Plant Height", "SLA", "Seed Mass", "SRL")),
+         sign = factor(sign, levels = c("significant", "nonsignificant"))) %>%
+  mutate(eunis_class = recode(eunis_class, 
+                              "MA" = "Coastal saltmarshes (MA)",
+                              "N" = "Costal habitats (N)",
+                              "Q" = "Wetlands (Q)",
+                              "R" = "Grasslands (R)",
+                              "S" = "Heathlands (S)",
+                              "T" = "Forests (T)",
+                              "U" = "Sparsely vegetated (U)",
+                              "V" = "Man-made habitats (V)"))
+
+dat.strat = dat.strat %>%
+  mutate(eunis_class1 = recode(eunis_class1,
+                               "MA" = "Coastal saltmarshes (MA)",
+                               "N" = "Costal habitats (N)",
+                               "Q" = "Wetlands (Q)",
+                               "R" = "Grasslands (R)",
+                               "S" = "Heathlands (S)",
+                               "T" = "Forests (T)",
+                               "U" = "Sparsely vegetated (U)",
+                               "V" = "Man-made habitats (V)")) %>%
+  dplyr::select(1:6, SLA = SLA_CWM, 'Plant Height' = PlantHeight_CWM, 'Seed Mass' = SeedMass_CWM, SRL = SpecificRootLength_CWM,
+                eunis_class1, eunis_class2, eunis_class3, PCA1, PCA2, PCA3, PCA4, PCA5)
+
+# change direction for PCA1 to make it a mediterranean gradient
+pos.pca1 = which(gams.slopes$pca == "PCA1")
+gams.slopes$slope[pos.pca1] =  0 - gams.slopes$slope[pos.pca1]
+pca.min.new = 0 - gams.slopes$pca_max[pos.pca1]
+pca.max.new = 0 - gams.slopes$pca_min[pos.pca1]
+gams.slopes$pca_min[pos.pca1] = pca.min.new
+gams.slopes$pca_max[pos.pca1] = pca.max.new
+
+dat.strat$PCA1 = 0 - dat.strat$PCA1
+
+# 4. create map with sample size and PC gradients -----------------------------------------
+# get european borders
+map.eu = fetch.european.borders()
+plot.countries = ggplot() +
+  geom_polygon(data = map.eu$borders, aes(x = longitude, y = latitude, group = group), 
+               fill = "lightgrey", color = "black", alpha = 0.5) +
+  theme(panel.grid = element_blank(), axis.title = element_blank())
+
+# create a raster tibble to fill with sample size data
+coords = cbind(x=dat.strat[["longitude"]],y=dat.strat[["latitude"]])
+sPDF = SpatialPointsDataFrame(coords, data = dat.strat)
+blankRaster = raster(xmn= -30, ymn = 20, xmx = 90,ymx = 90, resolution = 1,
+                     crs = "+proj=longlat +datum=WGS84")
+
+#adding data into raster to avoid 'no data' error
+blankRaster[] = 0
+rastercountsPoints = rasterize(x=sPDF, y=blankRaster, field= "plot_obsID" , fun="count")
+raster.counts = tibble(as.data.frame(rastercountsPoints, xy = T, na.rm = T)) %>%
+  rename(longitude = x, latitude = y, value = layer)
+
+# plot sample sizes
+plot.map = plot.countries +
+  geom_tile(data = raster.counts, aes(x = longitude, y = latitude, fill = value), alpha = 0.7) +
+  coord_cartesian(xlim = range(raster.counts$longitude), 
+                  ylim = range(raster.counts$latitude)) + 
+  scale_fill_viridis(name = "Nr of plots", option = "magma", 
+                       trans = "log", breaks = c(1,10, 100, 1000, 10000)) +
+  scale_y_continuous(position = "right") + 
+  ggtitle("Number of plots") + ylab("") + xlab("") + 
+  theme_bw() + 
+  theme(panel.background = element_blank(), panel.grid = element_blank(),
+        legend.position = "right", axis.ticks.length=unit(-0.25, "cm"))
+
+ggsave(plot = plot.map,
+       filename = "map_sample_size.png")
+
+# plot the distribution of PC values across Europe
+grid.PCA = dat.strat %>%
+  mutate(lon.group = cut(longitude, breaks = seq(floor(min(dat.strat$longitude)), ceiling(max(dat.strat$longitude)), by = 0.5),
+                         labels = seq(floor(min(dat.strat$longitude)) + 0.25, ceiling(max(dat.strat$longitude)), by = 0.5)),
+         lat.group = cut(latitude, breaks = seq(floor(min(dat.strat$latitude)), ceiling(max(dat.strat$latitude)), by = 0.5),
+                         labels = seq(floor(min(dat.strat$latitude)) + 0.25, ceiling(max(dat.strat$latitude)), by = 0.5))) %>%
+  group_by(lon.group, lat.group) %>%
+  summarise(PCA1 = mean(PCA1), PCA2 = mean(PCA2), PCA3 = mean(PCA3), PCA4 = mean(PCA4), .groups = "drop") %>%
+  mutate(across(where(is.factor), ~as.numeric(as.character(.x))))
+
+grid.traits = dat.strat %>%
+  mutate(lon.group = cut(longitude, breaks = seq(floor(min(dat.strat$longitude)), ceiling(max(dat.strat$longitude)), by = 1),
+                         labels = seq(floor(min(dat.strat$longitude)) + 0.5, ceiling(max(dat.strat$longitude)), by = 1)),
+         lat.group = cut(latitude, breaks = seq(floor(min(dat.strat$latitude)), ceiling(max(dat.strat$latitude)), by = 1),
+                         labels = seq(floor(min(dat.strat$latitude)) + 0.5, ceiling(max(dat.strat$latitude)), by = 1))) %>%
+  group_by(lon.group, lat.group, eunis_class1) %>%
+  summarise(Plant_height = mean(`Plant Height`), SLA = mean(SLA), Seed_mass = mean(`Seed Mass`), SRL = mean(SRL), .groups = "drop") %>%
+  mutate(across(where(is.factor), ~as.numeric(as.character(.x))))
+
+plot.pca1 = plot.countries  + 
+  geom_tile(data = grid.PCA, aes(x = lon.group, y = lat.group, fill = PCA1), alpha = 0.8) + 
+  scale_fill_viridis()  + xlab("") + ylab("") +
+  ggtitle("PC1:\nMediterranean gradient") + xlab("") + ylab("") + 
+  coord_cartesian(xlim = range(grid.PCA$lon.group), 
+                  ylim = range(grid.PCA$lat.group)) + 
+  theme_bw() + theme(panel.grid = element_blank(),legend.position = "bottom", legend.justification = "right", 
+                     axis.text = element_blank(),axis.title=element_blank(), axis.ticks.length=unit(-0.25, "cm"),
+                     legend.margin=margin(0,0,0,0), legend.box.margin=margin(-10,0,0,0))
+
+plot.pca2 = plot.countries  + 
+  geom_tile(data = grid.PCA, aes(x = lon.group, y = lat.group, fill = PCA2), alpha = 0.8) + 
+  scale_fill_viridis()  + xlab("") + ylab("") +
+  ggtitle("PC2:\ntemperature gradient") + xlab("") + ylab("") + 
+  coord_cartesian(xlim = range(grid.PCA$lon.group), 
+                  ylim = range(grid.PCA$lat.group)) + 
+  theme_bw() + theme(panel.grid = element_blank(),legend.position = "bottom", legend.justification = "right", 
+                     axis.text = element_blank(),axis.title=element_blank(), axis.ticks.length=unit(-0.25, "cm"),
+                     legend.margin=margin(0,0,0,0), legend.box.margin=margin(-10,0,0,0))
+
+plot.pca3 = plot.countries  + 
+  geom_tile(data = grid.PCA, aes(x = lon.group, y = lat.group, fill = PCA3), alpha = 0.8) + 
+  scale_fill_viridis()  + xlab("") + ylab("") +
+  ggtitle("PC3:\nsummer temperature-gradient") + xlab("") + ylab("") + 
+  coord_cartesian(xlim = range(grid.PCA$lon.group), 
+                  ylim = range(grid.PCA$lat.group)) + 
+  theme_bw() + theme(panel.grid = element_blank(),legend.position = "bottom", legend.justification = "right", 
+                     axis.text = element_blank(),axis.title=element_blank(), axis.ticks.length=unit(-0.25, "cm"),
+                     legend.margin=margin(0,0,0,0), legend.box.margin=margin(-10,0,0,0))
+
+plot.pca4 = plot.countries  + 
+  geom_tile(data = grid.PCA, aes(x = lon.group, y = lat.group, fill = PCA4), alpha = 0.8) + 
+  scale_fill_viridis()  + xlab("") + ylab("") +
+  ggtitle("PC4:\nseasonality gradient") +
+  coord_cartesian(xlim = range(grid.PCA$lon.group), 
+                  ylim = range(grid.PCA$lat.group)) + 
+  theme_bw() + theme(panel.grid = element_blank(),legend.position = "bottom", legend.justification = "right", 
+                     axis.text = element_blank(),axis.title=element_blank(), axis.ticks.length=unit(-0.25, "cm"),
+                     legend.margin=margin(0,0,0,0), legend.box.margin=margin(-10,0,0,0))
+
+
+#grid.arrange(plotPCA1, plotPCA2, plotPCA3, plotPCA4)
+ggsave(plot = grid.arrange(grobs = list(plot.map, plot.pca1, plot.pca2, plot.pca3, plot.pca4),
+                           layout_matrix = rbind(c(1,1,1,1),
+                                                 c(1,1,1,1),
+                                                 c(2,3,4,5))),
+       filename = "maps_pc_gradients.png")
+
+# 5. plot distribution of habitat types in PC space -------------------------------------
+plot1 = ggplot(data = dat.strat, aes(x = PCA1, y = PCA2, fill = eunis_class1)) +
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  geom_point(alpha = 0.1, color = "grey") + 
+  geom_bag(prop = 0.8,  alpha = 0.6) + # enclose 50% of points
+  scale_fill_manual(name = "Habitat type",
+                    values = c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#ffd966", "#FF7F00", "#cc0000", "#9832FF")) +
+  facet_wrap(eunis_class1 ~ . ) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), legend.position = "bottom")
+
+plot2 = ggplot(data = dat.strat, aes(x = PCA3, y = PCA4, fill = eunis_class1)) +
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  geom_point(alpha = 0.1, color = "grey") + 
+  geom_bag(prop = 0.8,  alpha = 0.6) + # enclose 50% of points
+  scale_fill_manual(name = "Habitat type",
+                    values = c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#ffd966", "#FF7F00", "#cc0000", "#9832FF")) +
+  facet_wrap(eunis_class1 ~ . ) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), legend.position = "bottom")
+
+plot3 = ggplot(data = dat.strat %>% drop_na(eunis_class2), 
+       aes(x = PCA1, y = PCA2, fill = eunis_class1)) +
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  geom_point(alpha = 0.1, color = "grey") + 
+  geom_bag(prop = 0.8,  alpha = 0.6) + 
+  scale_fill_manual(name = "Habitat type",
+                    values = c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#ffd966", "#FF7F00", "#cc0000", "#9832FF")) +
+  facet_wrap(eunis_class2 ~ . , ncol = 5) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), legend.position = "bottom")
+
+plot4 = ggplot(data = dat.strat %>% drop_na(eunis_class2), 
+               aes(x = PCA3, y = PCA4, fill = eunis_class1)) +
+  geom_hline(yintercept = 0, linetype = "dotted") + 
+  geom_vline(xintercept = 0, linetype = "dotted") + 
+  geom_point(alpha = 0.1, color = "grey") + 
+  geom_bag(prop = 0.8,  alpha = 0.6) + 
+  scale_fill_manual(name = "Habitat type",
+                    values = c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#ffd966", "#FF7F00", "#cc0000", "#9832FF")) +
+  facet_wrap(eunis_class2 ~ . , ncol = 5) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), legend.position = "bottom")
+
+ggsave(plot = plot1, 
+       filename = "chull_eunis_class1_pca12.png")
+
+ggsave(plot = plot2, 
+       filename = "chull_eunis_class1_pca34.png")
+
+ggsave(plot = plot3, 
+       filename = "chull_eunis_class2_pca12.png")
+
+ggsave(plot = plot4, 
+       filename = "chull_eunis_class2_pca34.png")
+
+# 6. plot proportion of explainef variation per GAMMs ----------------------
+# separated by climate and habitat type
+
+# naming convention
+# -1: model 1, including only fixed effects of climate
+#  0: model 2, including fixed effects and level 1 habitats as random effects
+#  1: model 3, including fixed effects random interaction with broad level 1 habitats as random effects
+#  2: model 4, including fixed effects random interaction with intermediate level 2 habitats as random effects
+#  3: model 5, including fixed effects random interaction with narrow level 3 habitats as random effects
+
+data.to.plot = gams.r2 %>%
+  dplyr::select(!r2.conditional) %>%
+  pivot_longer(cols = c("r2.climate", "r2.habitat")) %>%
+  mutate(value = value * 100) %>%
+  mutate(name = recode(name, "r2.climate" = "Climate","r2.habitat" = "Habitat")) %>%
+  mutate(name = factor(name, levels = c("Climate","Habitat"))) %>%
+  mutate(value = ifelse(name == "Habitat", 0 - value, value)) %>%
+  mutate(eunis_level = recode(eunis_level, 
+                              "-1" = "Cl",
+                              "0"  = "Cl + broad",
+                              "1"  = "Cl * broad",
+                              "2"  = "Cl * intermediate",
+                              "3"  = "Cl * narrow"))
+data.to.plot$eunis_level = factor(data.to.plot$eunis_level, levels = c(
+    "Cl", "Cl + broad", "Cl * broad", 
+    "Cl * intermediate", "Cl * narrow"))
+  
+plot.r2 = ggplot(data = data.to.plot) +
+  geom_bar(aes(x = eunis_level, y = value, fill = name), stat = "identity") +
+  geom_hline(yintercept = 0) +
+  facet_grid(name ~ trait, scales = "free", switch = "y") +
+  scale_fill_manual(values = c("#6699d8", "#F6685E")) + 
+  theme_bw() +
+  theme(legend.position = "none", panel.grid = element_blank(),
+        axis.text.x=element_text(angle = -45, hjust = 0),
+        plot.margin = unit(c(0.5,1,0.5,0.5), "cm")) +
+  xlab("") +
+  ylab("Explained variation (%)") 
+
+ggsave(plot = plot.r2,
+       "r2_per_model.svg")
+
+# 7. plot slopes from model 1 and 3, i.e. one slope across all plots + random slopes within broad habitats -------------------------------------
+dat.for.plot.points = dat.strat %>%
+  dplyr::select(eunis_class1, eunis_class2, 
+                'Plant Height', SLA, 'Seed Mass', SRL, 
+                PCA1, PCA2, PCA3, PCA4) %>%
+  pivot_longer(col = c(PCA1, PCA2, PCA3, PCA4), names_to = "pca", values_to = "pca_value") %>%
+  rename(trait_value = 3) %>%
+  drop_na(trait_value) %>%
+  mutate(pca_long = recode(pca, "PCA1" = "PC1: Mediterranean gradient",
+                           "PCA2" = "PC2: temperature gradient",
+                           "PCA3" = "PC3: summer temperature gradient ",
+                           "PCA4" = "PC4: seasonality gradient"))
+
+dat.for.plot.points1 = dat.strat %>%
+  dplyr::select(plot_obsID, eunis_class1, eunis_class2, PCA1, PCA2, PCA3, PCA4) %>%
+  pivot_longer(cols = contains("PCA"), names_to = "pca", values_to = "pca_value")
+dat.for.plot.points2 = dat.strat %>%
+  dplyr::select(plot_obsID, 'Plant Height', SLA, 'Seed Mass', SRL) %>%
+  pivot_longer(cols = c(SLA, 'Plant Height', 'Seed Mass', SRL), names_to = "trait", values_to = "trait_value")
+dat.for.plot.points = full_join(dat.for.plot.points1, dat.for.plot.points2, by = "plot_obsID") %>%
+  mutate(pca_long = recode(pca, "PCA1" = "PC1: Mediterranean gradient",
+                           "PCA2" = "PC2: temperature gradient",
+                           "PCA3" = "PC3: summer temperature gradient ",
+                           "PCA4" = "PC4: seasonality gradient")) %>%
+  mutate(trait = factor(trait, levels = c("Plant Height", "SLA", "Seed Mass", "SRL")))
+
+dat.for.plot.lines = gams.slopes %>%
+  filter(pca %in% c("PCA1","PCA2", "PCA3", "PCA4")) %>%
+  mutate(pca_long = recode(pca, "PCA1" = "PC1: Mediterranean gradient",
+                           "PCA2" = "PC2: temperature gradient",
+                           "PCA3" = "PC3: summer temperature gradient ",
+                           "PCA4" = "PC4: seasonality gradient"))
+
+dat.for.plot.grand.slopes  = dat.for.plot.lines %>%
+  filter(eunis_level == 0) %>%
+  mutate(trait = factor(trait, levels = c("Plant Height", "SLA", "Seed Mass", "SRL")))
+
+dat.for.plot.eunis.level1  = dat.for.plot.lines %>%
+  filter(eunis_level == 1) %>%
+  mutate(eunis_class = factor(eunis_class, levels = unique(eunis_class)))
+
+# plot slopes along PC 1 and PC 2
+plot.12 = ggplot() +
+  
+  # plot distribution of plots 
+  geom_hex(data = filter(dat.for.plot.points, pca %in% c("PCA1", "PCA2")),
+           aes(x = pca_value, y = trait_value)) +  
+  
+  # plot slope from model 1, i.e. grand slope across all habitats
+  geom_segment(data = filter(dat.for.plot.grand.slopes, pca %in% c("PCA1", "PCA2")), 
+               aes(x = pca_min,
+                   y = intercept + (pca_min * slope),
+                   xend = pca_max,
+                   yend = intercept + (pca_max * slope),
+                   linetype = sign),
+               color = "black", size = 2, alpha = 0.6) +
+  
+  # plot slopes from model 3, i.e. random slopes within broad habitats
+  geom_segment(data = filter(dat.for.plot.eunis.level1, pca %in% c("PCA1", "PCA2")), 
+               aes(x = pca_min,
+                   y = intercept + (pca_min * slope),
+                   xend = pca_max,
+                   yend = intercept + (pca_max * slope),
+                   color = eunis_class,
+                   linetype = sign),
+               size = 1, alpha = 0.8) +
+  
+  facet_grid(trait ~ pca_long, scales = "free", switch = "y", 
+             labeller = label_bquote(cols = atop(bold(.(pca_long)), decreasing %<->% increasing),
+                                     rows = .(trait))) +
+  
+  scale_color_manual(name = "Habitat type", 
+                     values = c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#ffd966", "#FF7F00", "#cc0000", "#9832FF")) +
+  scale_linetype_manual(name = "Significance", breaks = c("significant", "nonsignificant"), values = c("solid", "dotted")) + 
+  scale_fill_gradientn(colours=c("#E8E8E8","#808080"),guide = "none", na.value=NA) + 
+  
+  # axes limits to 95% quantiles
+  coord_cartesian(ylim = quantile(dat.for.plot.points$trait_value, c(0.005, 0.995))) +
+  ylab("") + 
+  xlab("Principal component scores") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), strip.text.y = element_text(face = "bold"))
+
+ggsave(plot = plot.12, 
+       filename = "slopes_model1_and_3.png")
+
+# 8. plot slopes from model 4, i.e. random slopes within intermediate habitats -------------------------------------
+
+# plot slopes separately for each of the four plant traits
+for(trait.temp in unique(gams.slopes$trait)){
+  
+  dat.for.plot.lines = gams.slopes %>%
+    filter(n >= 100) %>%
+    filter(trait == trait.temp) %>%
+    filter(pca %in% c("PCA1","PCA3", 
+                      "PCA2","PCA4")) %>%
+    mutate(pca_long = recode(pca, "PCA1" = "PC1: Mediterranean gradient",
+                             "PCA2" = "PC2: temperature gradient",
+                             "PCA3" = "PC3: summer temperature gradient ",
+                             "PCA4" = "PC4: seasonality gradient"))
+  
+  dat.for.plot.eunis.level2  = dat.for.plot.lines %>%
+    filter(eunis_level == 2) %>%
+    mutate(eunis_class1 = substr(eunis_class, 1, 1)) %>%
+    mutate(eunis_class1 = recode(eunis_class1,
+                                 "MA" = "Coastal saltmarshes (MA)",
+                                 "N" = "Costal habitats (N)",
+                                 "Q" = "Wetlands (Q)",
+                                 "R" = "Grasslands (R)",
+                                 "S" = "Heathlands (S)",
+                                 "T" = "Forests (T)",
+                                 "U" = "Sparsely vegetated (U)",
+                                 "V" = "Man-made habitats (V)")) %>%
+    mutate(eunis_class1 = factor(eunis_class1, levels = unique(eunis_class1)))
+  
+  dat.for.plot.eunis.level2$slope_sign = 
+    ifelse(dat.for.plot.eunis.level2$sign == "significant" & dat.for.plot.eunis.level2$slope > 0, "positive", 
+           ifelse(dat.for.plot.eunis.level2$sign == "significant" & dat.for.plot.eunis.level2$slope < 0, "negative", "nonsignificant"))
+  dat.for.plot.eunis.level2$slope_sign = factor(dat.for.plot.eunis.level2$slope_sign, 
+                                                levels = c("positive", "negative","nonsignificant"))
+  
+  color.scheme = data.frame(slope_sign = c("positive","negative","nonsignificant"),
+                            color = c("#60b2fe", "#E76232", "#B2B2B2"))
+  
+  # plot PCA 1 and 2
+  plot.temp.pca12 = ggplot() + 
+    
+    # eunis level 2
+    geom_segment(data = filter(dat.for.plot.eunis.level2, pca %in% c("PCA1","PCA2")), 
+                 aes(x = pca_min,
+                     y = intercept + (pca_min * slope),
+                     xend = pca_max,
+                     yend = intercept + (pca_max * slope),
+                     color = slope_sign),
+                 size = 1,  alpha = 0.8) +
+    geom_label_repel(data = filter(dat.for.plot.eunis.level2, pca %in% c("PCA1","PCA2")), 
+                     aes(x = pca_max,
+                         y = intercept + (pca_max * slope),
+                         label = eunis_class,
+                         fill = slope_sign),
+                     max.overlaps = 30) + 
+      
+    facet_grid(eunis_class1 ~ pca_long, scales = "free", switch = "y", 
+               labeller = label_bquote(cols = atop(bold(.(pca_long)), decreasing %<->% increasing),
+                                       rows = .(eunis_class1))) +
+    
+    scale_color_manual(name = "Individual slopes", 
+                       values = filter(color.scheme, slope_sign %in%  filter(dat.for.plot.eunis.level2, pca %in% c("PCA1","PCA2"))$slope_sign) %>% pull(color)) + 
+    scale_fill_manual(name = "Individual slopes", 
+                      values = filter(color.scheme, slope_sign %in%  filter(dat.for.plot.eunis.level2, pca %in% c("PCA1","PCA2"))$slope_sign) %>% pull(color)) + 
+   
+    ylab(trait.temp) + 
+    xlab("Principal component") +
+    theme_bw() +
+    theme(panel.grid = element_blank(), strip.text.y = element_text(face = "bold")) +
+    guides(
+      fill = guide_legend(
+        title = "Individual slopes",
+        override.aes = aes(label = "")
+      )
+    )
+  
+  ggsave(plot = plot.temp.pca12, 
+         filename = paste0("slopes_model4_", trait.temp, "_pca12.png"))
+}
+
+# 8. plot slopes from model 5, i.e. random slopes within intermediate habitats -------------------------------------
+# this could be also done like in section 7 of this script
+# however, due to the many slopes, the figure would be too crowded so we summarized the direction and significance of slopes
+
+eunis.class3.slopes = gams.slopes %>%
+  filter(eunis_level == 3) %>%
+  filter(n >= 100) %>%
+  mutate(eunis_class1 = substr(eunis_class, 1, 1)) %>%
+  mutate(pca_long = recode(pca, "PCA1" = "PC1: Mediterranean gradient",
+                           "PCA2" = "PC2: temperature gradient",
+                           "PCA3" = "PC3: summer temperature gradient ",
+                           "PCA4" = "PC4: seasonality gradient")) %>%
+  mutate(eunis_class1 = recode(eunis_class1,
+                               "MA" = "Coastal saltmarshes (MA)",
+                               "N" = "Costal habitats (N)",
+                               "Q" = "Wetlands (Q)",
+                               "R" = "Grasslands (R)",
+                               "S" = "Heathlands (S)",
+                               "T" = "Forests (T)",
+                               "U" = "Sparsely vegetated (U)",
+                               "V" = "Man-made habitats (V)")) %>%
+  mutate(trait = factor(trait, levels = c("Plant Height", "SLA", "Seed Mass", "SRL")))
+
+eunis.class3.slopes$slope_sign = 
+  ifelse(eunis.class3.slopes$sign == "significant" & eunis.class3.slopes$slope > 0, "positive", 
+         ifelse(eunis.class3.slopes$sign == "significant" & eunis.class3.slopes$slope < 0, "negative", "nonsignificant"))
+eunis.class3.slopes$slope_sign = factor(eunis.class3.slopes$slope_sign, 
+                                        levels = c("positive", "nonsignificant", "negative"))
+
+eunis.class3.slopes = eunis.class3.slopes %>%
+  group_by(trait, pca, eunis_class1) %>%
+  count(slope_sign) %>%
+  ungroup() %>%
+  complete(pca, trait, eunis_class1, slope_sign, fill = list(n = NA))
+
+# proportion of nonsignificant slopes
+eunis.class3.slopes %>%
+  group_by(slope_sign) %>%
+  summarize(prop = sum(n, na.rm = T))
+  # colouring scheme
+  #color.scheme = data.frame(slope_sign = c("positive","negative","nonsignificant"),
+  #                          color = c("#60b2fe", "#E76232", "#B2B2B2"))
+  
+plot.temp1 = ggplot(filter(eunis.class3.slopes, pca == "PCA1")) +
+  geom_segment(aes(y = rev(slope_sign), yend = rev(slope_sign), x = 0, xend = n, color = slope_sign), size = 3.5) + 
+  #geom_bar(aes(y = slope_cat, x = n, fill = slope_cat), stat = "identity", size = 1) + 
+  #geom_point(aes(y = slope_cat, x = n, fill = slope_cat), pch = 21, size = 6) + 
+  geom_text(aes(y = rev(slope_sign), x = -4, label = n), size = 2.5) + 
+  
+  facet_grid(eunis_class1 ~ trait, scales = "free", switch = "y") + 
+  scale_color_manual(name = "Relationships", 
+                    values = (c("#60b2fe", "#B2B2B2", "#E76232"))) +
+  scale_fill_manual(name = "Relationships", 
+                    values = (c("#60b2fe", "#B2B2B2", "#E76232"))) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(),
+        strip.text.y.left = element_text(angle = 0, face = "bold")) +
+  coord_cartesian(xlim = c(-6, max(eunis.class3.slopes$n))) + 
+  ylab("") + xlab("") +
+  ggtitle("Relationships with PC1: Mediterranean gradient")
+
+plot.temp2 = ggplot(filter(eunis.class3.slopes, pca == "PCA2")) +
+  geom_segment(aes(y = rev(slope_sign), yend = rev(slope_sign), x = 0, xend = n, color = slope_sign), 
+               size = 3.5) + 
+  #geom_bar(aes(y = slope_cat, x = n, fill = slope_cat), stat = "identity", size = 1) + 
+  #geom_point(aes(y = slope_cat, x = n, fill = slope_cat), pch = 21, size = 6) + 
+  geom_text(aes(y = rev(slope_sign), x = -4, label = n), 
+            size = 2.5) + 
+  
+  facet_grid(eunis_class1 ~ trait, scales = "free", switch = "y") + 
+  scale_color_manual(name = "Relationships", 
+                     values = (c("#60b2fe", "#B2B2B2", "#E76232"))) +
+  scale_fill_manual(name = "Relationships", 
+                    values = (c("#60b2fe", "#B2B2B2", "#E76232"))) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(),
+        strip.text.y.left = element_text(angle = 0, face = "bold")) +
+  coord_cartesian(xlim = c(-6, max(eunis.class3.slopes$n))) + 
+  ylab("") + xlab("") +
+  ggtitle("Relationships with PC2: temperature gradient")
+
+ggsave(plot = ggarrange(plot.temp1, plot.temp2, 
+                        ncol=1, common.legend = TRUE, legend="right"),
+       filename = "slopes_model15_pca12.png")
