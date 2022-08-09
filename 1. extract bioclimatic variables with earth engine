@@ -1,3 +1,13 @@
+// ###########################################
+// Script for Google Earth Engine (https://code.earthengine.google.com/)
+// To extract bioclimatic variables from plot locations
+// This is an example scipt showing the extraction of only bio01 and bio02
+// Part of the project: Habitat-specificity of climate-trait relationships
+// script by: Dr. Stephan Kambach (stephan.kambach@gmail.com)
+// google earth engine code
+// visit https://biodiv-feedbacks.org/
+// #########################################
+
 // load data
 var bio01 = ee.Image("users/StephanKambach/CHELSA_bio01"); // CHELSA bioclim1 
 var bio02 = ee.Image("users/StephanKambach/CHELSA_bio02"); // CHELSA bioclim2
