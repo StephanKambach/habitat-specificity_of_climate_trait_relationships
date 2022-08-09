@@ -1,0 +1,499 @@
+###########################################
+# Calcaulte generalized additive mixed-effects models 
+# for the relationship of climate with community-weighted mean plant traits
+# script by: Dr. Stephan Kambach (stephan.kambach@gmail.com)
+###########################################
+
+
+# 1. load libraries ---------------------------------------------------
+library(tidyverse)
+library(tidyselect)
+library(raster)
+library(sp)
+library(rgdal)
+library(raster)
+library(vroom)
+library(ggeffects)
+library(dismo)
+library(emmeans)
+library(gratia)
+library(gridExtra)
+
+# 2. load data -----------------------------------------------------------
+setwd("")
+dat = read_delim("data_for_gams.csv", delim  ="\t")
+
+# log-transform CWMs
+dat.trans = dat %>%
+  mutate(SLA_CWM = log(SLA_CWM),
+         SLA_CWV = log(SLA_CWV + 0.000001),
+         PlantHeight_CWM = log(PlantHeight_CWM),
+         PlantHeight_CWV = log(PlantHeight_CWV + 0.000001),
+         SeedMass_CWM = log(SeedMass_CWM),
+         SeedMass_CWV = log(SeedMass_CWV + 0.000001),
+         SpecificRootLength_CWM = log(SpecificRootLength_CWM),
+         SpecificRootLength_CWV = log(SpecificRootLength_CWV + 0.000001)) %>%
+  
+  mutate(SLA_CWM = scale(SLA_CWM),
+         SLA_CWV = scale(SLA_CWV),
+         PlantHeight_CWM = scale(PlantHeight_CWM),
+         PlantHeight_CWM = scale(PlantHeight_CWM),
+         PlantHeight_CWV = scale(PlantHeight_CWV),
+         SeedMass_CWM = scale(SeedMass_CWM),
+         SeedMass_CWV = scale(SeedMass_CWV),
+         SpecificRootLength_CWM = scale(SpecificRootLength_CWM),
+         SpecificRootLength_CWV = scale(SpecificRootLength_CWV))
+         
+# 3. define functions ----------------------------------------------------
+# Function to extract the random effects variance
+get.random.effects.variance = function(component, variance){
+  #Z <-as.matrix(X[,component])
+  #sum(diag(Z %*% variance %*% t(Z)))/nrow(Z) # 0.401
+  Z <-as.matrix(model.matrix.temp[,component])
+  test = Z  %*% variance
+  sum(colSums(t(test) * t(Z))) / nrow(Z)}
+
+# Function to extract the R² values
+get.pseude.R2.values = function(model.temp) {
+  
+  # get the coefficient estimates of fixed effects
+  coef.fixed = coef(model.temp)[1:5]
+  
+  # get the variance components
+  Sigma.list = variance_comp(model.temp) %>%
+    mutate(component = recode(component,
+                              "s(latitude,longitude)" = "location", 
+                              
+                              "s(eunis_class1)" = "(Intercept)",
+                              "s(eunis_class1,PCA1)" = "PCA1", "s(eunis_class1,PCA2)" = "PCA2",
+                              "s(eunis_class1,PCA3)" = "PCA3", "s(eunis_class1,PCA4)" = "PCA4",
+                              
+                              "s(eunis_class2)" = "(Intercept)",
+                              "s(eunis_class2,PCA1)" = "PCA1", "s(eunis_class2,PCA2)" = "PCA2",
+                              "s(eunis_class2,PCA3)" = "PCA3", "s(eunis_class2,PCA4)" = "PCA4",
+                              
+                              "s(eunis_class3)" = "(Intercept)",
+                              "s(eunis_class3,PCA1)" = "PCA1", "s(eunis_class3,PCA2)" = "PCA2",
+                              "s(eunis_class3,PCA3)" = "PCA3", "s(eunis_class3,PCA4)" = "PCA4",
+                              "scale" = "residual"))
+  
+  #! not of the spline-on-a-sphere smoothing term, I have no idea how to do this
+  # and it is not necessary for model interpretation
+  if(nrow(Sigma.list) > 2) {
+    Sigma.list = Sigma.list %>%
+      filter(component %in% c("(Intercept)", "PCA1", "PCA2", "PCA3", "PCA4")) %>%
+      rowwise() %>%
+      mutate(sigma = get.random.effects.variance(component, variance)) %>%
+      ungroup() %>%
+      bind_rows(filter(Sigma.list, component %in% c("location", "residual")))
+    
+    test = get.random.effects.variance(component = "(Intercept)", variance = 0.401)
+    
+  }else{
+    Sigma.list = Sigma.list %>%
+      mutate(sigma = NA)}
+  
+  # calculate variance explained by fixed effects
+  sigma.fixed.climate = var(as.vector(coef.fixed %*% t(model.matrix.temp[,names(coef.fixed)])))
+  
+  # calculate sum of variance explained by eunis habitats and climate-interactions
+  sigma.random =  sum(Sigma.list$sigma, na.rm = T)
+  
+  # calculate sum of variance of random climate components
+  sigma.random.climate = Sigma.list %>%
+    filter(component %in% c("PCA1", "PCA2", "PCA3", "PCA4")) %>%
+    summarise(sum_sigma = sum(sigma, na.rm = T)) %>%
+    pull(sum_sigma)
+  
+  # calculate variance of eunis classes
+  sigma.random.habitats = Sigma.list %>%
+    filter(component == "(Intercept)") %>%
+    summarise(sum_sigma = sum(sigma, na.rm = T)) %>%
+    pull(sum_sigma)
+  
+  # calculate residual variance
+  sigma.resid = Sigma.list %>%
+    filter(component == "residual") %>%
+    pull(variance)
+  
+  # distribution-specific variance is zero
+  sigma.dist = 0
+  
+  # get total variance
+  sigma.total = sigma.fixed.climate + sigma.random + sigma.resid
+  
+  # get marginal R?
+  r2.marginal = sigma.fixed.climate / sigma.total
+  
+  # get conditional R?
+  r2.conditional = (sigma.fixed.climate + sigma.random) / sigma.total
+  
+  # get climate R?
+  r2.climate = (sigma.fixed.climate + sigma.random.climate) / sigma.total
+  
+  # get habitat R?
+  r2.habitat = (sigma.random.habitats) / sigma.total
+  
+  results = tibble(r2.marginal = r2.marginal,
+                   r2.conditional = r2.conditional,
+                   r2.climate = r2.climate,
+                   r2.habitat = r2.habitat)
+  
+  return(results)
+}
+
+# Function to extract the slope estimates and approximated confidence intervals
+get.slope.estimates = function(model.temp){
+  
+  results.slopes = data.frame(pca = NA, pca_min = NA, pca_max = NA, 
+                              eunis_class = NA, slope = NA, intercept = NA, n = NA, sign = NA)[0,]
+  
+  for(pca.temp in c("PCA1", "PCA2", "PCA3", "PCA4")){
+    
+    # get slopes within eunis_classes
+    Sigma.list = variance_comp(model.temp)
+    eunis_class.temp = gsub("\\)", "", gsub("s\\(","", Sigma.list$component[1]))
+    
+    # get fixed effects if no random slopes (i.e. EUNIS level 0)
+    if(nrow(Sigma.list) == 3){
+      results.slopes = rbind(results.slopes, 
+                             data.frame(pca = pca.temp, 
+                                        pca_min = min(model.temp$var.summary[[pca.temp]]),
+                                        pca_max = max(model.temp$var.summary[[pca.temp]]),
+                                        eunis_class = "all",
+                                        slope = coef(model.temp)[pca.temp],
+                                        intercept = coef(model.temp)["(Intercept)"],
+                                        n = nrow(dat.strat),
+                                        sign = ifelse(summary(model.temp)$p.pv[pca.temp] < 0.05, "significant", "nonsignificant")))}
+    
+    # check if there are any random-slope terms 
+    if(nrow(Sigma.list) > 3){
+      
+      pca0 = ggemmeans(model.temp, terms = c(paste(pca.temp, " [0]"), eunis_class.temp))
+      #pca1 = ggemmeans(model.temp, terms = c(paste(pca.temp, " [1]"), eunis_class.temp))
+      
+      # get slope estimates
+      eunis.class.temp = names(model.temp$model)[grepl("eunis", names(model.temp$model))]
+      em.temp = as_tibble(emtrends(model.temp, eunis.class.temp, pca.temp))
+      em.temp$sign = ifelse((em.temp$lower.CL < 0 & em.temp$upper.CL < 0) |  (em.temp$lower.CL > 0 & em.temp$upper.CL > 0), "significant", "nonsignificant")
+
+      # get min and max of PCA values within each EUNIS habitat type
+      pca.min.max = dat.strat %>%
+        dplyr::select(one_of(pca.temp), one_of(eunis_class.temp)) %>%
+        rename("PCA" = one_of(pca.temp), "eunis_class" = one_of(eunis_class.temp)) %>%
+        mutate(eunis_class = as.character(eunis_class)) %>%
+        group_by(eunis_class) %>%
+        summarise(pca_min = min(PCA), pca_max = max(PCA), n = length(PCA))
+      
+      pca.min.max = tibble(eunis_class = as.character(pca0$group)) %>%
+        left_join(pca.min.max, by = "eunis_class")
+      
+      results.slopes = rbind(results.slopes,
+                             data.frame(pca = pca.temp,
+                                        pca_min = pca.min.max$pca_min,
+                                        pca_max = pca.min.max$pca_max,
+                                        eunis_class = as.character(pca0$group), 
+                                        slope = em.temp[,2] %>% pull(),
+                                        intercept = pca0$predicted,
+                                        n = pca.min.max$n,
+                                        sign = em.temp$sign))}
+  }
+  return(results.slopes)
+}
+
+get.random.slope.sigfificances = function(model.temp){
+  
+    # get random term summary table
+    summary.temp = data.frame(summary(model.temp)$s.table)
+    summary.temp$pca = row.names(summary.temp)
+    summary.temp = as_tibble(summary.temp) %>%
+      filter(grepl("PCA", pca))
+    
+    if(nrow(summary.temp) == 4){
+      summary.temp = summary.temp %>%
+        mutate(pca = c("PCA1", "PCA2", "PCA3", "PCA4"))
+      chi.sq.temp = data.frame(summary(model.temp)$chi.sq)
+      chi.sq.temp$pca = row.names(chi.sq.temp)
+      chi.sq.temp = as_tibble(chi.sq.temp) %>%
+        filter(grepl("PCA", pca)) %>%
+        mutate(pca = c("PCA1", "PCA2", "PCA3", "PCA4"))
+      
+      results = data.frame(pca = summary.temp$pca, 
+                           chi.sq = chi.sq.temp$summary.model.temp..chi.sq, 
+                           edf = summary.temp$edf, 
+                           Ref.df = summary.temp$Ref.df, 
+                           F = summary.temp$F, 
+                           p = summary.temp$p.value)
+      
+    }else{
+      results = data.frame(pca = NA, chi.sq = NA, edf = NA,
+                           Ref.df = NA, F = NA, p = NA)[0,]}
+  
+  return(results)
+}
+
+
+# 4. Stratify plots spatially ----------------------------------------------
+# create a sample raster so that one plot per cell can be selected
+raster.sample = raster(xmn= -30, ymn = 20, xmx = 90,ymx = 90, resolution = 0.01,
+                       crs = "+proj=longlat +datum=WGS84")
+values(raster.sample) <- 1:ncell(raster.sample)
+
+# stratify plots per habitat class
+dat.split = dat.trans %>%
+  group_split(eunis_class1)
+for(i in 1:length(dat.split)){
+  plots.ids.stratified = 
+    as.numeric(rownames(gridSample(xy = 
+      data.frame(dat.split[[i]][,c("longitude","latitude")]), raster.sample, n = 1)))
+  dat.split[[i]] = dat.split[[i]][plots.ids.stratified, ]
+  print(paste0("stratified habitat class: ", unique(dat.split[[i]]$eunis_class1)))}
+
+# gather stratified plots in one tibble and make eunis habitat type a factor for the models
+dat.strat = bind_rows(dat.split)
+dat.strat$eunis_class1 = factor(dat.strat$eunis_class1)
+dat.strat$eunis_class2 = factor(dat.strat$eunis_class2)
+dat.strat$eunis_class3 = factor(dat.strat$eunis_class3)
+
+# write file
+write_delim(dat.strat, "data_strat_for_gams.csv")
+
+# 5. create empty tibbles to store model results ----------------------------
+# to store R² values
+all.results.r2 = data.frame(trait = NA, 
+                            eunis_level = NA,
+                            r2.climate = NA,
+                            r2.habitat = NA,
+                            r2.conditional = NA)[0,]
+
+# to store slope estimates
+all.results.slopes = data.frame(trait = NA, 
+                                eunis_level = NA,
+                                eunis_class = NA,
+                                pca = NA,
+                                slope = NA,
+                                intercept = NA,
+                                n = NA,
+                                pca_min = NA, 
+                                pca_max = NA,
+                                sign = NA)[0,]
+
+# to store significance of model terms
+all.results.random.slopes.significant = data.frame(trait = NA,
+                                                   eunis_level = NA, 
+                                                   pca = NA,
+                                                   chi.sq = NA,
+                                                   edf = NA,
+                                                   Ref.df = NA,
+                                                   F = NA,
+                                                   p = NA)[0,]
+
+# 6. Run model 1: fixed effects of climate in a balanced dataset --------------
+
+# Create a balanced data subset
+min.sample.size = dat.strat %>% 
+  group_by(eunis_class1) %>%
+  count()
+  
+dat.sampled = dat.strat %>% 
+  group_by(eunis_class1) %>%
+  slice(sample(n(), min(min.sample.size$n), n())) %>%
+  ungroup()
+
+# Run GAMM for community-weighted mean of SLA
+model.temp = mgcv::bam(SLA_CWM ~ PCA1 + PCA2 + PCA3 + PCA4 + 
+                         s(latitude, longitude, bs = "sos"),
+                       method = "fREML", data = dat.sampled)
+
+# extract grand slope and residuals for model checks
+Fitted = predict(model.temp)
+Residuals = residuals(model.temp)
+plot1.sla = ggplot() + geom_histogram(aes(x = Residuals)) + theme_bw() + ggtitle("SLA - residuals")
+plot2.sla = ggplot() + geom_point(aes(x = Fitted, y = Residuals)) + theme_bw() + ggtitle("SLA - residuals vs. fitted")
+
+# extract R² values
+model.matrix.temp = as_tibble(model.matrix(model.temp))
+R2.temp = get.pseude.R2.values(model.temp)
+
+# store results
+all.results.r2 = rbind(all.results.r2, 
+                       data.frame(trait = "SLA_CWM", eunis_level = -1, r2.climate = R2.temp$r2.climate,
+                                  r2.habitat = R2.temp$r2.habitat, r2.conditional = R2.temp$r2.conditional))
+
+print("done: Model 1: SLA_CWM")
+
+# 7. Run model 2: fixed effects of climate + random effects of habitat --------------
+
+# Run GAMM for community-weighted mean of SLA
+model.temp = mgcv::bam(SLA_CWM ~ PCA1 + PCA2 + PCA3 + PCA4 + 
+                         s(eunis_class1, bs = "re") +
+                         s(latitude, longitude, bs = "sos"),
+                       method = "fREML", 
+                       data = dat.strat)
+
+# extract grand slope and residuals for model checks
+Fitted = predict(model.temp)
+Residuals = residuals(model.temp)
+plot3.sla = ggplot() + geom_histogram(aes(x = Residuals)) + theme_bw() + ggtitle("SLA - residuals")
+plot4.sla = ggplot() + geom_point(aes(x = Fitted, y = Residuals)) + theme_bw() + ggtitle("SLA - residuals vs. fitted")
+
+# extract R² values and slopes
+model.matrix.temp = as_tibble(model.matrix(model.temp))
+R2.temp = get.pseude.R2.values(model.temp)
+s.temp = get.slope.estimates(model.temp)
+
+# store results
+all.results.r2 = rbind(all.results.r2, 
+                       data.frame(trait = "SLA_CWM", eunis_level = 0, r2.climate = R2.temp$r2.climate,
+                                  r2.habitat = R2.temp$r2.habitat, r2.conditional = R2.temp$r2.conditional))
+all.results.slopes = rbind(all.results.slopes, 
+                           data.frame(trait = "SLA_CWM", eunis_level = 0, eunis_class = "all", 
+                                      pca = s.temp$pca, slope = s.temp$slope, intercept = s.temp$intercept,
+                                      n = s.temp$n, pca_min = s.temp$pca_min, pca_max = s.temp$pca_max, sign = s.temp$sign))
+print("done: Model 2: SLA_CWM")
+
+# 8. Run model 3: fixed and random effects of climate with broad habitat types --------------
+
+# Run GAMM for community-weighted mean of SLA
+model.temp = mgcv::bam(SLA_CWM ~ PCA1 + PCA2 + PCA3 + PCA4 +
+                         s(eunis_class1, bs= "re") + 
+                         s(eunis_class1, PCA1, bs="re") + 
+                         s(eunis_class1, PCA2, bs="re") + 
+                         s(eunis_class1, PCA3, bs="re") + 
+                         s(eunis_class1, PCA4, bs="re") + 
+                         s(latitude, longitude, bs = "sos"),
+                       method = "fREML", 
+                       data = dat.strat)
+
+# extract grand slope and residuals for model checks
+Fitted = predict(model.temp)
+Residuals = residuals(model.temp)
+plot5.sla = ggplot() + geom_histogram(aes(x = Residuals)) + theme_bw() + ggtitle("SLA - residuals")
+plot6.sla = ggplot() + geom_point(aes(x = Fitted, y = Residuals)) + theme_bw() + ggtitle("SLA - residuals vs. fitted")
+
+# extract R² values and slopes
+model.matrix.temp = as_tibble(model.matrix(model.temp))
+R2.temp = get.pseude.R2.values(model.temp)
+s.temp = get.slope.estimates(model.temp)
+rs.sign.temp = get.random.slope.sigfificances(model.temp)
+
+# store results
+all.results.r2 = rbind(all.results.r2, 
+                       data.frame(trait = "SLA_CWM", eunis_level = 1, r2.climate = R2.temp$r2.climate,
+                                  r2.habitat = R2.temp$r2.habitat, r2.conditional = R2.temp$r2.conditional))
+all.results.slopes = rbind(all.results.slopes, 
+                           data.frame(trait = "SLA_CWM", eunis_level = 1, eunis_class = s.temp$eunis_class, 
+                                      pca = s.temp$pca, slope = s.temp$slope, intercept = s.temp$intercept,
+                                      n = s.temp$n, pca_min = s.temp$pca_min, pca_max = s.temp$pca_max, sign = s.temp$sign))
+all.results.random.slopes.significant = 
+  rbind(all.results.random.slopes.significant,
+        data.frame(trait = "SLA_CWM", eunis_level = 1, pca = rs.sign.temp$pca, chi.sq = rs.sign.temp$chi.sq,
+                   edf = rs.sign.temp$edf, Ref.df = rs.sign.temp$Ref.df, F = rs.sign.temp$F, p = rs.sign.temp$p))
+
+print("done: Model 3: SLA_CWM")
+
+# 9. Run model 4: fixed and random effects of climate with intermediate habitat types --------------
+
+# Run GAMM for community-weighted mean of SLA
+model.temp = mgcv::bam(SLA_CWM ~ PCA1 + PCA2 + PCA3 + PCA4 +
+                         s(eunis_class2, bs= "re") + 
+                         s(eunis_class2, PCA1, bs="re") + 
+                         s(eunis_class2, PCA2, bs="re") + 
+                         s(eunis_class2, PCA3, bs="re") + 
+                         s(eunis_class2, PCA4, bs="re") + 
+                         s(latitude, longitude, bs = "sos"),
+                       method = "fREML", 
+                       data = dat.strat)
+
+# extract grand slope and residuals for model checks
+Fitted = predict(model.temp)
+Residuals = residuals(model.temp)
+plot7.sla = ggplot() + geom_histogram(aes(x = Residuals)) + theme_bw() + ggtitle("SLA - residuals")
+plot8.sla = ggplot() + geom_point(aes(x = Fitted, y = Residuals)) + theme_bw() + ggtitle("SLA - residuals vs. fitted")
+
+# extract R² values and slopes
+model.matrix.temp = as_tibble(model.matrix(model.temp))
+R2.temp = get.pseude.R2.values(model.temp)
+s.temp = get.slope.estimates(model.temp)
+rs.sign.temp = get.random.slope.sigfificances(model.temp)
+
+# store results
+all.results.r2 = rbind(all.results.r2, 
+                       data.frame(trait = "SLA_CWM", eunis_level = 2, r2.climate = R2.temp$r2.climate,
+                                  r2.habitat = R2.temp$r2.habitat, r2.conditional = R2.temp$r2.conditional))
+all.results.slopes = rbind(all.results.slopes, 
+                           data.frame(trait = "SLA_CWM", eunis_level = 2, eunis_class = s.temp$eunis_class, 
+                                      pca = s.temp$pca, slope = s.temp$slope, intercept = s.temp$intercept,
+                                      n = s.temp$n, pca_min = s.temp$pca_min, pca_max = s.temp$pca_max, sign = s.temp$sign))
+all.results.random.slopes.significant = 
+  rbind(all.results.random.slopes.significant,
+        data.frame(trait = "SLA_CWM", eunis_level = 2, pca = rs.sign.temp$pca, chi.sq = rs.sign.temp$chi.sq,
+                   edf = rs.sign.temp$edf, Ref.df = rs.sign.temp$Ref.df, F = rs.sign.temp$F, p = rs.sign.temp$p))
+
+print("done: Model 4: SLA_CWM")
+
+# 10. Run model 5: fixed and random effects of climate with narrow habitat types --------------
+
+# Run GAMM for community-weighted mean of SLA
+model.temp = mgcv::bam(SLA_CWM ~ PCA1 + PCA2 + PCA3 + PCA4 +
+                         s(eunis_class3, bs= "re") + 
+                         s(eunis_class3, PCA1, bs="re") + 
+                         s(eunis_class3, PCA2, bs="re") + 
+                         s(eunis_class3, PCA3, bs="re") + 
+                         s(eunis_class3, PCA4, bs="re") + 
+                         s(latitude, longitude, bs = "sos"),
+                       method = "fREML", 
+                       data = dat.strat)
+
+# extract grand slope and residuals for model checks
+Fitted = predict(model.temp)
+Residuals = residuals(model.temp)
+plot9.sla = ggplot() + geom_histogram(aes(x = Residuals)) + theme_bw() + ggtitle("SLA - residuals")
+plot10.sla = ggplot() + geom_point(aes(x = Fitted, y = Residuals)) + theme_bw() + ggtitle("SLA - residuals vs. fitted")
+
+# extract R² values and slopes
+model.matrix.temp = as_tibble(model.matrix(model.temp))
+R2.temp = get.pseude.R2.values(model.temp)
+s.temp = get.slope.estimates(model.temp)
+rs.sign.temp = get.random.slope.sigfificances(model.temp)
+
+# store results
+all.results.r2 = rbind(all.results.r2, 
+                       data.frame(trait = "SLA_CWM", eunis_level = 3, r2.climate = R2.temp$r2.climate,
+                                  r2.habitat = R2.temp$r2.habitat, r2.conditional = R2.temp$r2.conditional))
+all.results.slopes = rbind(all.results.slopes, 
+                           data.frame(trait = "SLA_CWM", eunis_level = 3, eunis_class = s.temp$eunis_class, 
+                                      pca = s.temp$pca, slope = s.temp$slope, intercept = s.temp$intercept,
+                                      n = s.temp$n, pca_min = s.temp$pca_min, pca_max = s.temp$pca_max, sign = s.temp$sign))
+all.results.random.slopes.significant = 
+  rbind(all.results.random.slopes.significant,
+        data.frame(trait = "SLA_CWM", eunis_level = 3, pca = rs.sign.temp$pca, chi.sq = rs.sign.temp$chi.sq,
+                   edf = rs.sign.temp$edf, Ref.df = rs.sign.temp$Ref.df, F = rs.sign.temp$F, p = rs.sign.temp$p))
+
+print("done: Model 5: SLA_CWM")
+
+# 11. write result files ------------------------------------------------------
+vroom_write(all.results.r2, "feedbacks_project1/intermediate output/gams_r2_and_slopes/gam_results_r2.csv", delim = "\t")
+vroom_write(all.results.slopes, "feedbacks_project1/intermediate output/gams_r2_and_slopes/gam_results_slopes.csv", delim = "\t")
+vroom_write(all.results.random.slopes.significant, "feedbacks_project1/intermediate output/gams_r2_and_slopes/gam_results_random_slope_significances.csv", delim = "\t")
+
+# save residual plots
+png(filename = "Model_residuals_model1_sla.png")
+grid.arrange(plot1.sla, plot2.sla, ncol = 2)
+graphics.off()
+
+png(filename = "Model_residuals_model2_sla.png")
+grid.arrange(plot3.sla, plot4.sla, ncol = 2)
+graphics.off()
+
+png(filename = "Model_residuals_model3_sla.png")
+grid.arrange(plot5.sla, plot6.sla, ncol = 2)
+graphics.off()
+
+png(filename = "Model_residuals_model4_sla.png")
+grid.arrange(plot7.sla, plot8.sla, ncol = 2)
+graphics.off()
+
+png(filename = "Model_residuals_model5_sla.png")
+grid.arrange(plot9.sla, plot10.sla, ncol = 2)
+graphics.off()
