@@ -460,6 +460,8 @@ plot.r2 = ggplot(data = data.to.plot) +
   geom_hline(yintercept = 0) +
   facet_grid(name ~ trait, scales = "free", switch = "y") +
   scale_fill_manual(values = c("#6699d8", "#F6685E")) + 
+  scale_y_continuous(breaks = c(-75, -50, -25, 0, 5, 10, 15), 
+                     labels = c(75, 50, 25, 0, 5, 10, 15)) +
   theme_bw() +
   theme(legend.position = "none", panel.grid = element_blank(),
         axis.text.x=element_text(angle = -45, hjust = 0),
