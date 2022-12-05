@@ -27,7 +27,7 @@ library(gridExtra)
 
 # 2. load data -----------------------------------------------------------
 setwd("")
-dat = read_delim("data_for_gams.csv", delim  ="\t")
+dat = read_delim("plot_level_cmw_data.csv", delim  ="\t")
 
 # log-transform CWMs
 dat.trans = dat %>%
