@@ -29,6 +29,12 @@ library(gridExtra)
 setwd("")
 dat = read_delim("plot_level_cmw_data.csv", delim  ="\t")
 
+# set habitat type as factor for models to run properly
+dat = dat %>%
+  mutate(eunis_class1 = factor(eunis_class1),
+         eunis_class2 = factor(eunis_class2),
+         eunis_class3 = factor(eunis_class3))
+
 # log-transform CWMs
 dat.trans = dat %>%
   mutate(SLA_CWM = log(SLA_CWM),
